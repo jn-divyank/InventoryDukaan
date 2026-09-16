@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>अर्पित स्टील सेंटर - स्मार्ट ERP बिलिंग प्रो+</title>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 :root {
   --primary: #1e3a8a;
@@ -147,6 +148,7 @@ input:focus, select:focus { border-color: var(--primary-light); }
     <button class="btn-top" onclick="openHistoryModal()">📜 हिस्ट्री</button>
     <button class="btn-top" onclick="openBackupModal()">💾 बैकअप</button>
     <button class="btn-top" onclick="resetNewBill()">+ New</button>
+    <button class="btn-top" id="syncChip" onclick="handleSyncChipClick()" style="background:#64748b; border-color:rgba(255,255,255,0.5);">☁️ ...</button>
   </div>
 </div>
 
@@ -390,6 +392,23 @@ input:focus, select:focus { border-color: var(--primary-light); }
 </div>
 
 <!-- Modal: Customer Directory & Khata -->
+<div class="modal-overlay" id="loginModal">
+  <div class="modal" style="max-width:340px;">
+    <div class="modal-header">
+      <h3 style="font-size:16px;">☁️ क्लाउड लॉगइन</h3>
+      <button onclick="closeLoginModal()" style="border:none;background:none;font-size:18px;cursor:pointer;">✕</button>
+    </div>
+    <p style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">एक बार लॉगइन करने पर डेटा अपने आप सेव होता रहेगा।</p>
+    <div style="display:flex; flex-direction:column; gap:6px;">
+      <input type="email" id="loginEmail" placeholder="ईमेल" autocomplete="username">
+      <input type="password" id="loginPass" placeholder="पासवर्ड" autocomplete="current-password">
+      <button class="btn-add" onclick="doLogin()" style="padding:8px;">लॉगइन</button>
+      <button onclick="doLogout()" style="padding:6px; font-size:11px; background:none; border:1px solid var(--border); border-radius:6px; cursor:pointer; color:var(--text-muted);">लॉगआउट</button>
+      <div id="loginMsg" style="font-size:11px; color:var(--danger); min-height:14px;"></div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="custModal">
   <div class="modal">
     <div class="modal-header">
@@ -569,6 +588,7 @@ function postBillToLedger(record) {
       amount: (record.type === 'PURCHASE' ? -due : due),
       note: record.type === 'PURCHASE' ? '\u0916\u0930\u0940\u0926 \u0909\u0927\u093e\u0930' : '\u0909\u0927\u093e\u0930 \u092c\u093f\u0915\u094d\u0930\u0940'
     });
+    markDirty('ledger', ledger[0].id);
     persistLedger();
   } else if (ledger.length !== before) {
     persistLedger();
@@ -594,6 +614,7 @@ function recordPayment(idx) {
     amount: -amt,
     note: '\u092d\u0941\u0917\u0924\u093e\u0928 \u092a\u094d\u0930\u093e\u092a\u094d\u0924'
   });
+  markDirty('ledger', ledger[0].id);
   persistLedger();
   renderModalCustList();
   onCustInput();
@@ -762,8 +783,11 @@ function autoSaveCustomer(info) {
       if (acc) customers[idx].acc = acc;
       if (name) customers[idx].name = name;
       if (phone) customers[idx].phone = phone;
+      markDirty('parties', customers[idx].id);
     } else {
-      customers.unshift({ id: nextCustId(), acc, name, phone, oldBal: 0, openingBal: 0 });
+      const fresh = { id: nextCustId(), acc, name, phone, oldBal: 0, openingBal: 0 };
+      customers.unshift(fresh);
+      markDirty('parties', fresh.id);
     }
     persistCustomers();
     renderCustomerSuggestions();
@@ -807,6 +831,7 @@ function saveCurrentBillToHistory() {
     persistSales();
   }
 
+  markDirty('documents', record.type + ':' + record.billNo);
   postBillToLedger(record);
 
   /* The counter advances the moment a bill number is first committed, not on
@@ -1143,8 +1168,11 @@ function saveManualCustomer() {
     ex.phone = phone || ex.phone;
     ex.openingBal = oldBal;
     ex.oldBal = oldBal;
+    markDirty('parties', ex.id);
   } else {
-    customers.unshift({ id: nextCustId(), acc, name: name || 'पार्टी ' + acc, phone, oldBal, openingBal: oldBal });
+    const fresh = { id: nextCustId(), acc, name: name || 'पार्टी ' + acc, phone, oldBal, openingBal: oldBal };
+    customers.unshift(fresh);
+    markDirty('parties', fresh.id);
   }
 
   persistCustomers();
@@ -1233,6 +1261,7 @@ function autoSaveToCatalog(name, mrp, disc) {
   }
   catalog.unshift({ name: cleanName, mrp, disc });
   persistCatalog();
+  markDirty('products', cleanName);
   renderCatalog();
 }
 
@@ -1632,6 +1661,286 @@ renderCatalog();
 renderCustomerSuggestions();
 renderItems();
 checkBackupAge();
+
+/* ==================================================================
+   Supabase sync — local-first.
+
+   localStorage stays the source of truth the UI reads and writes, so billing
+   never waits on the network. A shop's connection drops; a customer standing
+   at the counter does not. Mutations mark records dirty; a background flush
+   pushes them to Postgres and pulls anything newer back.
+   ================================================================== */
+const SB_URL = 'https://mgfmqfhaysohwetuxpdq.supabase.co';
+const SB_KEY = 'sb_publishable_MZIzVv2WJ_7ugrZgaLpMMw_P9vks99_';
+
+let sb = null, sbUser = null;
+let storeId = localStorage.getItem('asc_store_id') || null;
+let syncBusy = false, syncTimer = null;
+let dirty = JSON.parse(localStorage.getItem('asc_dirty') || '{}');
+['parties','products','documents','ledger'].forEach(k => { if (!dirty[k]) dirty[k] = []; });
+let partyUuid = JSON.parse(localStorage.getItem('asc_party_uuid') || '{}');
+let docUuid   = JSON.parse(localStorage.getItem('asc_doc_uuid')   || '{}');
+
+function dirtyCount() {
+  return ['parties','products','documents','ledger'].reduce((n,k) => n + dirty[k].length, 0);
+}
+
+function markDirty(kind, id) {
+  const k = String(id);
+  if (!dirty[kind].includes(k)) {
+    dirty[kind].push(k);
+    persist('asc_dirty', dirty);
+  }
+  setSyncChip();
+  scheduleSync();
+}
+
+function markAllDirty() {
+  dirty.parties   = customers.map(c => String(c.id));
+  dirty.products  = catalog.map(c => c.name);
+  dirty.documents = salesHistory.concat(purchaseHistory).map(b => b.type + ':' + b.billNo);
+  dirty.ledger    = ledger.map(e => String(e.id));
+  persist('asc_dirty', dirty);
+  setSyncChip();
+}
+
+function setSyncChip(state, text) {
+  const chip = document.getElementById('syncChip');
+  if (!chip) return;
+  const pending = dirtyCount();
+  if (!state) {
+    if (!sbUser)            { state = 'out';  text = '\u2601\ufe0f \u0932\u0949\u0917\u0907\u0928 \u0915\u0930\u0947\u0902'; }
+    else if (!navigator.onLine) { state = 'off'; text = '\u26a1 \u0911\u092b\u0932\u093e\u0907\u0928' + (pending ? ' (' + pending + ')' : ''); }
+    else if (pending)       { state = 'wait'; text = '\u2601\ufe0f ' + pending + ' \u092c\u093e\u0915\u0940'; }
+    else                    { state = 'ok';   text = '\u2705 \u0938\u0947\u0935'; }
+  }
+  const colors = { ok:'#16a34a', wait:'#d97706', off:'#64748b', err:'#dc2626', out:'#2563eb', busy:'#2563eb' };
+  chip.style.background = colors[state] || '#64748b';
+  chip.innerText = text;
+}
+
+function scheduleSync(delay) {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(syncNow, delay === undefined ? 2500 : delay);
+}
+
+/* ---------------- auth ---------------- */
+async function initSupabase() {
+  if (!window.supabase) { setSyncChip('err', '\u2601\ufe0f \u0909\u092a\u0932\u092c\u094d\u0927 \u0928\u0939\u0940\u0902'); return; }
+  sb = window.supabase.createClient(SB_URL, SB_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true, storageKey: 'asc_sb_auth' }
+  });
+  const { data } = await sb.auth.getSession();
+  sbUser = data.session ? data.session.user : null;
+  sb.auth.onAuthStateChange((_evt, sess) => {
+    sbUser = sess ? sess.user : null;
+    setSyncChip();
+    if (sbUser) syncNow();
+  });
+  setSyncChip();
+  if (sbUser) syncNow();
+}
+
+function openLoginModal()  { document.getElementById('loginModal').style.display = 'flex'; }
+function closeLoginModal() { document.getElementById('loginModal').style.display = 'none'; }
+
+async function doLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const pass  = document.getElementById('loginPass').value;
+  const msg   = document.getElementById('loginMsg');
+  if (!email || !pass) { msg.innerText = '\u0908\u092e\u0947\u0932 \u0914\u0930 \u092a\u093e\u0938\u0935\u0930\u094d\u0921 \u0921\u093e\u0932\u0947\u0902'; return; }
+  msg.innerText = '\u0932\u0949\u0917\u0907\u0928 \u0939\u094b \u0930\u0939\u093e \u0939\u0948...';
+  const { error } = await sb.auth.signInWithPassword({ email, password: pass });
+  if (error) { msg.innerText = '\u2717 ' + error.message; return; }
+  msg.innerText = '';
+  document.getElementById('loginPass').value = '';
+  closeLoginModal();
+  showToast('\u2705 \u0932\u0949\u0917\u0907\u0928 \u0938\u092b\u0932');
+}
+
+async function doLogout() {
+  if (dirtyCount() && !confirm('\u0905\u092d\u0940 ' + dirtyCount() + ' \u0930\u093f\u0915\u0949\u0930\u094d\u0921 \u0938\u093f\u0902\u0915 \u0928\u0939\u0940\u0902 \u0939\u0941\u090f \u0939\u0948\u0902\u0964 \u092b\u093f\u0930 \u092d\u0940 \u0932\u0949\u0917\u0906\u0909\u091f \u0915\u0930\u0947\u0902?')) return;
+  await sb.auth.signOut();
+  showToast('\u0932\u0949\u0917\u0906\u0909\u091f \u0939\u094b \u0917\u092f\u093e');
+}
+
+function handleSyncChipClick() {
+  if (!sbUser) openLoginModal();
+  else syncNow(true);
+}
+
+/* ---------------- store bootstrap ---------------- */
+async function ensureStore() {
+  if (storeId) return storeId;
+  const { data: mem, error } = await sb.from('store_users').select('store_id').limit(1);
+  if (error) throw error;
+  if (mem && mem.length) {
+    storeId = mem[0].store_id;
+  } else {
+    const { data: store, error: e2 } = await sb.from('stores')
+      .insert({ owner_id: sbUser.id, name: '\u0905\u0930\u094d\u092a\u093f\u0924 \u0938\u094d\u091f\u0940\u0932 \u0938\u0947\u0902\u091f\u0930',
+                address: '\u092d\u0940\u092e\u0917\u0902\u091c\u092e\u0902\u0921\u0940, \u0915\u094b\u091f\u093e \u091c\u0902\u0915\u094d\u0936\u0928',
+                phone: '7011013472', upi_id: storeUPI })
+      .select().single();
+    if (e2) throw e2;
+    const { error: e3 } = await sb.from('store_users')
+      .insert({ store_id: store.id, user_id: sbUser.id, role: 'owner' });
+    if (e3) throw e3;
+    storeId = store.id;
+    /* First sync on a fresh store: everything local is new to the server. */
+    markAllDirty();
+  }
+  persist('asc_store_id', storeId);
+  return storeId;
+}
+
+/* ---------------- push ---------------- */
+async function pushParties() {
+  if (!dirty.parties.length) return;
+  const rows = customers
+    .filter(c => dirty.parties.includes(String(c.id)))
+    .map(c => ({ store_id: storeId, client_id: String(c.id), acc_no: c.acc || null,
+                 name: c.name || '\u092a\u093e\u0930\u094d\u091f\u0940', phone: c.phone || null,
+                 opening_balance: parseFloat(c.openingBal) || 0 }));
+  if (rows.length) {
+    const { data, error } = await sb.from('parties')
+      .upsert(rows, { onConflict: 'store_id,client_id' }).select('id,client_id');
+    if (error) throw error;
+    data.forEach(r => { partyUuid[r.client_id] = r.id; });
+    persist('asc_party_uuid', partyUuid);
+  }
+  dirty.parties = [];
+}
+
+async function pushProducts() {
+  if (!dirty.products.length) return;
+  const rows = catalog
+    .filter(c => dirty.products.includes(c.name))
+    .map(c => ({ store_id: storeId, client_id: c.name, name: c.name,
+                 mrp: parseFloat(c.mrp) || 0, default_discount: parseFloat(c.disc) || 0 }));
+  if (rows.length) {
+    const { error } = await sb.from('products')
+      .upsert(rows, { onConflict: 'store_id,client_id' });
+    if (error) throw error;
+  }
+  dirty.products = [];
+}
+
+async function pushDocuments() {
+  if (!dirty.documents.length) return;
+  const all = salesHistory.concat(purchaseHistory);
+  const remaining = [];
+
+  for (const key of dirty.documents.slice()) {
+    const bill = all.find(b => (b.type || 'SALE') + ':' + b.billNo === key);
+    if (!bill) continue;
+    const t = bill.totals || {};
+    const row = {
+      store_id: storeId, client_id: key,
+      doc_type: bill.type || 'SALE', doc_no: bill.billNo,
+      party_id: bill.partyId ? (partyUuid[String(bill.partyId)] || null) : null,
+      party_text: bill.cust || null,
+      issued_at: parseBillDate(bill),
+      pay_mode: bill.payMode || 'Cash',
+      sum_mrp: t.sumMRP || 0, scrap_deduction: t.scrap || 0,
+      extra_discount: t.extra || 0, grand_total: t.grandTotal || 0,
+      split_paid: t.splitPaid || 0
+    };
+    const { data, error } = await sb.from('documents')
+      .upsert(row, { onConflict: 'store_id,client_id' }).select('id').single();
+
+    if (error) {
+      /* 23505 on (store_id,doc_type,doc_no) means another device already used
+         this bill number. Never silently renumber a bill a customer is holding
+         — surface it and keep the rest of the sync moving. */
+      if (error.code === '23505') {
+        console.warn('Bill number already taken on the server:', bill.billNo);
+        showToast('\u26a0\ufe0f \u092c\u093f\u0932 \u0928\u0902. ' + bill.billNo + ' \u0938\u0930\u094d\u0935\u0930 \u092a\u0930 \u092a\u0939\u0932\u0947 \u0938\u0947 \u0939\u0948');
+        continue;
+      }
+      remaining.push(key);
+      throw error;
+    }
+
+    docUuid[key] = data.id;
+    await sb.from('document_items').delete().eq('document_id', data.id);
+    const lines = (bill.items || []).map((it, i) => ({
+      document_id: data.id, line_no: i + 1, name: it.name || '\u0906\u0907\u091f\u092e',
+      qty: parseFloat(it.qty) || 1, unit: it.unit || 'Pcs',
+      mrp: parseFloat(it.mrp) || 0, discount_pct: parseFloat(it.disc) || 0,
+      total_mrp: parseFloat(it.totalMRP) || 0, net_price: parseFloat(it.netPrice) || 0,
+      warranty: it.warranty || null
+    }));
+    if (lines.length) {
+      const { error: le } = await sb.from('document_items').insert(lines);
+      if (le) throw le;
+    }
+  }
+  persist('asc_doc_uuid', docUuid);
+  dirty.documents = remaining;
+}
+
+async function pushLedger() {
+  if (!dirty.ledger.length) return;
+  const rows = ledger
+    .filter(e => dirty.ledger.includes(String(e.id)))
+    .map(e => ({
+      store_id: storeId, client_id: String(e.id),
+      party_id: partyUuid[String(e.partyId)] || null,
+      document_id: e.billNo ? (docUuid['SALE:' + e.billNo] || docUuid['PURCHASE:' + e.billNo] || null) : null,
+      entry_type: e.type || 'ADJUSTMENT',
+      entry_date: parseBillDate(e),
+      amount: parseFloat(e.amount) || 0,
+      note: e.note || null
+    }))
+    .filter(r => r.party_id);   // an entry with no synced party is pushed on the next pass
+  if (rows.length) {
+    const { error } = await sb.from('ledger_entries')
+      .upsert(rows, { onConflict: 'store_id,client_id' });
+    if (error) throw error;
+  }
+  dirty.ledger = [];
+}
+
+/* dd/mm/yyyy hh:mm -> ISO. Falls back to now() rather than writing a bad date. */
+function parseBillDate(rec) {
+  const raw = rec.date || rec.dateOnly || '';
+  const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+  if (!m) return new Date().toISOString();
+  return new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)).toISOString();
+}
+
+/* ---------------- sync driver ---------------- */
+async function syncNow(manual) {
+  if (syncBusy || !sb || !sbUser) { if (manual && !sbUser) openLoginModal(); return; }
+  if (!navigator.onLine) { setSyncChip(); return; }
+  syncBusy = true;
+  setSyncChip('busy', '\u2601\ufe0f \u0938\u093f\u0902\u0915...');
+  try {
+    await ensureStore();
+    await pushParties();
+    await pushProducts();
+    await pushDocuments();
+    await pushLedger();
+    persist('asc_dirty', dirty);
+    persist('asc_last_sync', String(Date.now()));
+    setSyncChip();
+    if (manual) showToast('\u2705 \u0938\u093f\u0902\u0915 \u092a\u0942\u0930\u093e');
+  } catch (err) {
+    console.error('sync failed', err);
+    persist('asc_dirty', dirty);
+    setSyncChip('err', '\u26a0\ufe0f \u0938\u093f\u0902\u0915 \u092b\u0947\u0932');
+    if (manual) alert('\u0938\u093f\u0902\u0915 \u0928\u0939\u0940\u0902 \u0939\u094b \u092a\u093e\u092f\u093e:\n' + (err.message || err));
+  } finally {
+    syncBusy = false;
+  }
+}
+
+window.addEventListener('online',  () => { setSyncChip(); scheduleSync(1000); });
+window.addEventListener('offline', () => setSyncChip());
+setInterval(() => { if (dirtyCount()) scheduleSync(0); }, 5 * 60 * 1000);
+initSupabase();
+
 </script>
 </body>
 </html>

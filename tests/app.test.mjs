@@ -7,7 +7,8 @@ const ok = (name, cond, extra = '') => {
   else { fail++; console.log('  FAIL  ' + name + (extra ? '  -> ' + extra : '')); }
 };
 
-const browser = await chromium.launch();
+const PROXY = process.env.HTTPS_PROXY || undefined;
+const browser = await chromium.launch({ proxy: PROXY ? { server: PROXY, bypass: '127.0.0.1,localhost' } : undefined });
 const ctx = await browser.newContext();
 const page = await ctx.newPage();
 page.on('dialog', d => d.accept('')); // auto-accept confirms
