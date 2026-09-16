@@ -1014,8 +1014,14 @@ function importDataBackup(event) {
       localStorage.setItem('asc_purchase_no', purchaseCounter);
       localStorage.setItem('asc_store_upi', storeUPI);
 
+      /* Backups taken before the ledger existed have no party ids; backfill
+         them now so a payment recorded in this session cannot post to an
+         undefined party. */
+      ensureCustomerIds();
+
       renderCatalog();
       renderCustomerSuggestions();
+      renderItems();
       updateBillNumber();
       closeBackupModal();
       showToast("✅ सारा डेटा सफलतापूर्वक रीस्टोर हो गया!");
