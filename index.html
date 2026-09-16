@@ -155,6 +155,8 @@ input:focus, select:focus { border-color: var(--primary-light); }
   </div>
 </div>
 
+<div id="backupNagBar" onclick="exportDataBackup()" style="display:none; background:#fef3c7; border:1px solid #fcd34d; color:#92400e; border-radius:8px; padding:7px 10px; margin-bottom:8px; font-size:12px; font-weight:600; cursor:pointer; text-align:center;"></div>
+
 <div class="mode-toggle-bar">
   <button type="button" class="btn-mode-toggle active-sale" id="btnModeSale" onclick="setDocMode('SALE')">🛍️ ग्राहक बिक्री (SALE)</button>
   <button type="button" class="btn-mode-toggle" id="btnModePurchase" onclick="setDocMode('PURCHASE')">📦 माल खरीद (PURCHASE)</button>
@@ -485,6 +487,123 @@ let currentDocMode = 'SALE';
 let currentHistTab = 'SALE';
 let storeUPI = localStorage.getItem('asc_store_upi') || '7011013472@paytm';
 let currentCustomerOldBal = 0;
+let ledger = JSON.parse(localStorage.getItem('asc_ledger') || '[]');
+let custSeq = parseInt(localStorage.getItem('asc_cust_seq') || '0');
+let ledgerSeq = parseInt(localStorage.getItem('asc_ledger_seq') || '0');
+let itemSeq = 0;
+
+/* ---------------- storage layer ----------------
+   Every write goes through persist() so a full/blocked localStorage fails
+   loudly instead of silently dropping the shop's data. Saving is no longer a
+   side effect of a render function. */
+let storageFull = false;
+function persist(key, value) {
+  try {
+    localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
+    return true;
+  } catch (err) {
+    if (!storageFull) {
+      storageFull = true;
+      alert('\u26a0\ufe0f \u092e\u0947\u092e\u094b\u0930\u0940 \u092d\u0930 \u0917\u0908 \u0939\u0948 \u2014 \u0928\u092f\u093e \u0921\u0947\u091f\u093e \u0938\u0947\u0935 \u0928\u0939\u0940\u0902 \u0939\u094b \u0930\u0939\u093e!\n\n\u0924\u0941\u0930\u0902\u0924 "\u092c\u0948\u0915\u0905\u092a" \u092c\u091f\u0928 \u0926\u092c\u093e\u0915\u0930 \u092b\u093e\u0907\u0932 \u0938\u0947\u0935 \u0915\u0930\u0947\u0902\u0964');
+    }
+    return false;
+  }
+}
+function persistCatalog()   { persist('asc_catalog', catalog); }
+function persistCustomers() { persist('asc_customers', customers); }
+function persistSales()     { persist('asc_sales_history', salesHistory); }
+function persistPurchases() { persist('asc_purchase_history', purchaseHistory); }
+function persistLedger()    { persist('asc_ledger', ledger); }
+
+/* ---------------- html escaping ----------------
+   Item and party names are free text typed at the counter. Without this an
+   apostrophe in a name produced broken markup and dead buttons. */
+function esc(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* ---------------- party ledger ----------------
+   The running balance is DERIVED from ledger entries, never hand-typed.
+   amount > 0 : party owes the shop   amount < 0 : the shop owes the party */
+function nextCustId()   { custSeq++;   persist('asc_cust_seq', custSeq);     return custSeq; }
+function nextLedgerId() { ledgerSeq++; persist('asc_ledger_seq', ledgerSeq); return ledgerSeq; }
+
+function ensureCustomerIds() {
+  let changed = false;
+  customers.forEach(c => {
+    if (!c.id) { c.id = nextCustId(); changed = true; }
+    if (c.openingBal === undefined) { c.openingBal = parseFloat(c.oldBal) || 0; changed = true; }
+  });
+  if (changed) persistCustomers();
+}
+
+function partyBalance(cust) {
+  if (!cust) return 0;
+  const opening = parseFloat(cust.openingBal !== undefined ? cust.openingBal : cust.oldBal) || 0;
+  return ledger.reduce((sum, e) => (e.partyId === cust.id ? sum + e.amount : sum), opening);
+}
+
+function findCustomerByInfo(info) {
+  if (!info) return null;
+  const accMatch = info.match(/\[\u0916\u093e\u0924\u093e:\s*([^\]]+)\]/);
+  const acc = accMatch ? accMatch[1].trim() : '';
+  const phoneMatch = info.match(/\b[6-9]\d{9}\b/);
+  const phone = phoneMatch ? phoneMatch[0] : '';
+  return customers.find(c => (acc && c.acc === acc) || (phone && c.phone === phone)) || null;
+}
+
+/* Re-posts a bill's ledger entry. Removing the previous entry for the same
+   bill number first makes this safe to call repeatedly on edit/reprint. */
+function postBillToLedger(record) {
+  const before = ledger.length;
+  ledger = ledger.filter(e => !(e.type === 'BILL' && e.billNo === record.billNo));
+  let due = 0;
+  if (record.payMode === 'Credit') due = record.totals.grandTotal;
+  else if (record.payMode === 'Split') due = record.totals.splitBalance;
+
+  if (record.partyId && due > 0) {
+    ledger.unshift({
+      id: nextLedgerId(),
+      partyId: record.partyId,
+      type: 'BILL',
+      billNo: record.billNo,
+      date: record.date,
+      dateOnly: record.dateOnly,
+      amount: (record.type === 'PURCHASE' ? -due : due),
+      note: record.type === 'PURCHASE' ? '\u0916\u0930\u0940\u0926 \u0909\u0927\u093e\u0930' : '\u0909\u0927\u093e\u0930 \u092c\u093f\u0915\u094d\u0930\u0940'
+    });
+    persistLedger();
+  } else if (ledger.length !== before) {
+    persistLedger();
+  }
+}
+
+function recordPayment(idx) {
+  const c = customers[idx];
+  if (!c) return;
+  const bal = partyBalance(c);
+  const raw = prompt('\u0915\u093f\u0924\u0928\u093e \u092d\u0941\u0917\u0924\u093e\u0928 \u092e\u093f\u0932\u093e? (\u092c\u0915\u093e\u092f\u093e: \u20b9' + bal.toLocaleString('en-IN') + ')', bal > 0 ? String(bal) : '');
+  if (raw === null) return;
+  const amt = parseFloat(raw);
+  if (!amt || amt <= 0) { alert('\u0915\u0943\u092a\u092f\u093e \u0938\u0939\u0940 \u0930\u093e\u0936\u093f \u0921\u093e\u0932\u0947\u0902'); return; }
+  const now = new Date();
+  ledger.unshift({
+    id: nextLedgerId(),
+    partyId: c.id,
+    type: 'PAYMENT',
+    billNo: '',
+    date: now.toLocaleDateString('en-GB') + ' ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+    dateOnly: now.toLocaleDateString('en-GB'),
+    amount: -amt,
+    note: '\u092d\u0941\u0917\u0924\u093e\u0928 \u092a\u094d\u0930\u093e\u092a\u094d\u0924'
+  });
+  persistLedger();
+  renderModalCustList();
+  onCustInput();
+  showToast('\u2705 \u20b9' + amt.toLocaleString('en-IN') + ' \u092d\u0941\u0917\u0924\u093e\u0928 \u0926\u0930\u094d\u091c \u0939\u0941\u0906');
+}
 
 function setDocMode(mode) {
   currentDocMode = mode;
@@ -529,13 +648,9 @@ function setPaymentMode(mode) {
 }
 
 function updateBillNumber() {
-  if (currentDocMode === 'SALE') {
-    document.getElementById('billNoDisplay').innerText = `ASC-${String(billCounter).padStart(3, '0')}`;
-    localStorage.setItem('asc_bill_no', billCounter);
-  } else {
-    document.getElementById('billNoDisplay').innerText = `PUR-${String(purchaseCounter).padStart(3, '0')}`;
-    localStorage.setItem('asc_purchase_no', purchaseCounter);
-  }
+  const n = currentDocMode === 'SALE' ? billCounter : purchaseCounter;
+  const prefix = currentDocMode === 'SALE' ? 'ASC-' : 'PUR-';
+  document.getElementById('billNoDisplay').innerText = prefix + String(n).padStart(3, '0');
 }
 
 function handleReceiptScan(event) {
@@ -606,9 +721,8 @@ function renderCustomerSuggestions() {
   datalist.innerHTML = customers.map(c => {
     const accPrefix = c.acc ? `[खाता: ${c.acc}] ` : '';
     const phoneSuffix = c.phone ? ` - ${c.phone}` : '';
-    return `<option value="${accPrefix}${c.name}${phoneSuffix}"></option>`;
+    return `<option value="${esc(accPrefix + c.name + phoneSuffix)}"></option>`;
   }).join('');
-  localStorage.setItem('asc_customers', JSON.stringify(customers));
 }
 
 function onCustInput() {
@@ -622,7 +736,7 @@ function onCustInput() {
     const accPrefix = match.acc ? `[खाता: ${match.acc}] ` : '';
     const phoneSuffix = match.phone ? ` - ${match.phone}` : '';
     document.getElementById('custInfo').value = `${accPrefix}${match.name}${phoneSuffix}`;
-    currentCustomerOldBal = match.oldBal || 0;
+    currentCustomerOldBal = partyBalance(match);
     if (currentCustomerOldBal > 0) {
       strip.style.display = 'flex';
       document.getElementById('dispOldBalText').innerText = `₹${currentCustomerOldBal.toLocaleString('en-IN')}`;
@@ -654,8 +768,9 @@ function autoSaveCustomer(info) {
       if (name) customers[idx].name = name;
       if (phone) customers[idx].phone = phone;
     } else {
-      customers.unshift({ acc, name, phone, oldBal: 0 });
+      customers.unshift({ id: nextCustId(), acc, name, phone, oldBal: 0, openingBal: 0 });
     }
+    persistCustomers();
     renderCustomerSuggestions();
   }
 }
@@ -669,27 +784,42 @@ function saveCurrentBillToHistory() {
   const dateStr = now.toLocaleDateString('en-GB');
   const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
 
-  const record = { 
-    billNo, 
+  const party = findCustomerByInfo(cust);
+  const record = {
+    billNo,
     type: currentDocMode,
-    cust, 
+    cust,
+    partyId: party ? party.id : null,
     date: `${dateStr} ${timeStr}`,
     dateOnly: dateStr,
-    payMode: currentPayMode, 
-    items: [...items], 
-    totals 
+    payMode: currentPayMode,
+    items: [...items],
+    totals
   };
 
+  let isNewBill;
   if (currentDocMode === 'PURCHASE') {
     const idx = purchaseHistory.findIndex(b => b.billNo === billNo);
-    if (idx !== -1) purchaseHistory[idx] = record;
-    else purchaseHistory.unshift(record);
-    localStorage.setItem('asc_purchase_history', JSON.stringify(purchaseHistory));
+    isNewBill = idx === -1;
+    if (isNewBill) purchaseHistory.unshift(record);
+    else purchaseHistory[idx] = record;
+    persistPurchases();
   } else {
     const idx = salesHistory.findIndex(b => b.billNo === billNo);
-    if (idx !== -1) salesHistory[idx] = record;
-    else salesHistory.unshift(record);
-    localStorage.setItem('asc_sales_history', JSON.stringify(salesHistory));
+    isNewBill = idx === -1;
+    if (isNewBill) salesHistory.unshift(record);
+    else salesHistory[idx] = record;
+    persistSales();
+  }
+
+  postBillToLedger(record);
+
+  /* The counter advances the moment a bill number is first committed, not on
+     "new bill". Previously it only moved in resetNewBill(), so closing the app
+     after printing reused the same number and overwrote the earlier sale. */
+  if (isNewBill) {
+    if (currentDocMode === 'SALE') { billCounter++; persist('asc_bill_no', billCounter); }
+    else { purchaseCounter++; persist('asc_purchase_no', purchaseCounter); }
   }
 }
 
@@ -843,13 +973,16 @@ function renderQRCodeImage(amt) {
 function openBackupModal() { document.getElementById('backupModal').style.display = 'flex'; }
 function closeBackupModal() { document.getElementById('backupModal').style.display = 'none'; }
 function exportDataBackup() {
-  const fullData = { catalog, customers, salesHistory, purchaseHistory, billCounter, purchaseCounter, storeUPI, exportDate: new Date().toISOString() };
+  const fullData = { catalog, customers, salesHistory, purchaseHistory, ledger, custSeq, ledgerSeq, billCounter, purchaseCounter, storeUPI, schemaVersion: 2, exportDate: new Date().toISOString() };
   const blob = new Blob([JSON.stringify(fullData, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = `Arpit_Steel_ERP_Backup_${new Date().toLocaleDateString('en-GB').replace(/\//g, '-')}.json`;
   a.click();
+  URL.revokeObjectURL(url);
+  persist('asc_last_backup', String(Date.now()));
+  checkBackupAge();
   showToast("💾 बैकअप फाइल डाउनलोड हो गई!");
 }
 function importDataBackup(event) {
@@ -863,6 +996,9 @@ function importDataBackup(event) {
       if (data.customers) customers = data.customers;
       if (data.salesHistory) salesHistory = data.salesHistory;
       if (data.purchaseHistory) purchaseHistory = data.purchaseHistory;
+      if (data.ledger) ledger = data.ledger;
+      if (data.custSeq) custSeq = data.custSeq;
+      if (data.ledgerSeq) ledgerSeq = data.ledgerSeq;
       if (data.billCounter) billCounter = data.billCounter;
       if (data.purchaseCounter) purchaseCounter = data.purchaseCounter;
       if (data.storeUPI) storeUPI = data.storeUPI;
@@ -871,6 +1007,9 @@ function importDataBackup(event) {
       localStorage.setItem('asc_customers', JSON.stringify(customers));
       localStorage.setItem('asc_sales_history', JSON.stringify(salesHistory));
       localStorage.setItem('asc_purchase_history', JSON.stringify(purchaseHistory));
+      localStorage.setItem('asc_ledger', JSON.stringify(ledger));
+      localStorage.setItem('asc_cust_seq', custSeq);
+      localStorage.setItem('asc_ledger_seq', ledgerSeq);
       localStorage.setItem('asc_bill_no', billCounter);
       localStorage.setItem('asc_purchase_no', purchaseCounter);
       localStorage.setItem('asc_store_upi', storeUPI);
@@ -964,18 +1103,23 @@ function openCustModal() { renderModalCustList(); document.getElementById('custM
 function closeCustModal() { document.getElementById('custModal').style.display = 'none'; }
 function renderModalCustList() {
   const ul = document.getElementById('modalCustList');
-  ul.innerHTML = customers.map((c, i) => `
+  ul.innerHTML = customers.map((c, i) => {
+    const bal = partyBalance(c);
+    const balColor = bal > 0 ? '#dc2626' : (bal < 0 ? '#2563eb' : 'var(--text-muted)');
+    const balLabel = bal < 0 ? 'हमारे ऊपर' : 'बकाया';
+    return `
     <li class="cat-item-row">
       <div>
-        <strong>${c.acc ? '[खाता: ' + c.acc + '] ' : ''}${c.name}</strong><br>
-        <span style="font-size:11px; color:var(--text-muted);">${c.phone ? 'मो: ' + c.phone : 'मोबाइल नहीं'} | बकाया: ₹${c.oldBal || 0}</span>
+        <strong>${c.acc ? '[खाता: ' + esc(c.acc) + '] ' : ''}${esc(c.name)}</strong><br>
+        <span style="font-size:11px; color:var(--text-muted);">${c.phone ? 'मो: ' + esc(c.phone) : 'मोबाइल नहीं'} | <b style="color:${balColor};">${balLabel}: ₹${Math.abs(bal).toLocaleString('en-IN')}</b></span>
       </div>
       <div>
+        <button class="btn-edit" title="भुगतान दर्ज करें" onclick="recordPayment(${i})" style="background:#dcfce7;">💰</button>
         <button class="btn-edit" onclick="editCustomer(${i})">✏️</button>
         <button class="btn-del" onclick="deleteCustomer(${i})">🗑️</button>
       </div>
     </li>
-  `).join('');
+  `; }).join('');
 }
 function saveManualCustomer() {
   const acc = document.getElementById('mCustAcc').value.trim();
@@ -990,11 +1134,19 @@ function saveManualCustomer() {
 
   const existingIdx = customers.findIndex(c => (acc && c.acc === acc) || (phone && c.phone === phone));
   if (existingIdx !== -1) {
-    customers[existingIdx] = { acc, name: name || customers[existingIdx].name, phone: phone || customers[existingIdx].phone, oldBal };
+    /* Merge, don't replace: a fresh object literal dropped the party's id and
+       unlinked every ledger entry pointing at it. */
+    const ex = customers[existingIdx];
+    ex.acc = acc || ex.acc;
+    ex.name = name || ex.name;
+    ex.phone = phone || ex.phone;
+    ex.openingBal = oldBal;
+    ex.oldBal = oldBal;
   } else {
-    customers.unshift({ acc, name: name || 'पार्टी ' + acc, phone, oldBal });
+    customers.unshift({ id: nextCustId(), acc, name: name || 'पार्टी ' + acc, phone, oldBal, openingBal: oldBal });
   }
 
+  persistCustomers();
   renderCustomerSuggestions();
   renderModalCustList();
   document.getElementById('mCustAcc').value = '';
@@ -1021,15 +1173,21 @@ function renderCatalog() {
   const chipContainer = document.getElementById('chipsContainer');
   const dataList = document.getElementById('catalogDataList');
   
-  chipContainer.innerHTML = catalog.slice(0, 10).map(c => `
-    <button class="chip-btn" onclick="selectCatalogItem('${c.name}', ${c.mrp}, ${c.disc})">
-      ${c.name} (₹${c.mrp})
+  chipContainer.innerHTML = catalog.slice(0, 10).map((c, i) => `
+    <button class="chip-btn" data-cat-idx="${i}">
+      ${esc(c.name)} (₹${c.mrp})
     </button>
   `).join('');
 
-  dataList.innerHTML = catalog.map(c => `<option value="${c.name}">MRP: ₹${c.mrp} | छूट: ${c.disc}%</option>`).join('');
-  localStorage.setItem('asc_catalog', JSON.stringify(catalog));
+  dataList.innerHTML = catalog.map(c => `<option value="${esc(c.name)}">MRP: ₹${c.mrp} | छूट: ${c.disc}%</option>`).join('');
 }
+
+document.addEventListener('click', function (ev) {
+  const btn = ev.target.closest('[data-cat-idx]');
+  if (!btn) return;
+  const c = catalog[parseInt(btn.getAttribute('data-cat-idx'), 10)];
+  if (c) selectCatalogItem(c.name, c.mrp, c.disc);
+});
 
 function selectCatalogItem(name, mrp, disc) {
   document.getElementById('itemName').value = name;
@@ -1073,6 +1231,7 @@ function autoSaveToCatalog(name, mrp, disc) {
     catalog.splice(existingIndex, 1);
   }
   catalog.unshift({ name: cleanName, mrp, disc });
+  persistCatalog();
   renderCatalog();
 }
 
@@ -1097,7 +1256,7 @@ function addItemToList() {
   const totalMRP = Math.round(mrp * effectiveQty);
   const netPrice = Math.round(totalMRP - (totalMRP * disc / 100));
 
-  items.push({ id: Date.now(), name, qty, unit, mrp, disc, warranty, totalMRP, netPrice });
+  items.push({ id: Date.now() + '-' + (++itemSeq), name, qty, unit, mrp, disc, warranty, totalMRP, netPrice });
   saveState();
   autoSaveToCatalog(name, mrp, disc);
 
@@ -1134,8 +1293,8 @@ function renderItems() {
     listEl.innerHTML = items.map((item, idx) => `
       <li class="item-row" id="row-${idx}">
         <div class="item-info">
-          <strong>${idx + 1}. ${item.name}</strong> (${item.qty} ${item.unit || 'Pcs'})
-          ${item.warranty && item.warranty !== 'कोई नहीं' ? `<span style="background:#eff6ff; color:#1e40af; padding:1px 4px; border-radius:4px; font-size:10px; font-weight:bold; margin-left:4px;">🛡️ ${item.warranty}</span>` : ''}
+          <strong>${idx + 1}. ${esc(item.name)}</strong> (${item.qty} ${esc(item.unit || 'Pcs')})
+          ${item.warranty && item.warranty !== 'कोई नहीं' ? `<span style="background:#eff6ff; color:#1e40af; padding:1px 4px; border-radius:4px; font-size:10px; font-weight:bold; margin-left:4px;">🛡️ ${esc(item.warranty)}</span>` : ''}
           <div class="item-math">दर: ₹${item.mrp} | छूट: ${item.disc}% | MRP: ₹${item.totalMRP}</div>
         </div>
         <div class="item-actions">
@@ -1151,10 +1310,10 @@ function renderItems() {
 }
 
 function deleteItem(idx) { items.splice(idx, 1); saveState(); renderItems(); }
-function saveState() { localStorage.setItem('asc_current_items', JSON.stringify(items)); }
+function saveState() { persist('asc_current_items', items); }
 function saveDeductions() {
-  localStorage.setItem('asc_scrap', document.getElementById('scrapDeduction').value);
-  localStorage.setItem('asc_extra', document.getElementById('extraDiscount').value);
+  persist('asc_scrap', document.getElementById('scrapDeduction').value);
+  persist('asc_extra', document.getElementById('extraDiscount').value);
 }
 
 function applyExtraPercent(pct) {
@@ -1199,12 +1358,12 @@ function calculateFinalBill() {
 
 function resetNewBill() {
   if (items.length > 0) {
+    if (!confirm("क्या आप नया बिल बनाना चाहते हैं? पिछला बिल हिस्ट्री में सेव हो जाएगा।")) return;
     saveCurrentBillToHistory();
-    if (!confirm("क्या आप नया बिल बनाना चाहते हैं? पिछला बिल हिस्ट्री में सेव हो गया है।")) return;
   }
-  if (currentDocMode === 'SALE') billCounter++;
-  else purchaseCounter++;
 
+  /* No increment here: saveCurrentBillToHistory() already advanced the counter
+     when the bill number was first committed. */
   updateBillNumber();
   items = [];
   saveState();
@@ -1444,7 +1603,25 @@ function printThermalSlip() {
   window.print();
 }
 
+/* A backup the shopkeeper has to remember to take is not a backup. Nag if the
+   last export is more than 7 days old. */
+function checkBackupAge() {
+  const last = parseInt(localStorage.getItem('asc_last_backup') || '0');
+  const days = last ? Math.floor((Date.now() - last) / 86400000) : null;
+  const bar = document.getElementById('backupNagBar');
+  if (!bar) return;
+  if (days === null || days >= 7) {
+    bar.innerHTML = (days === null)
+      ? '\u26a0\ufe0f \u0906\u092a\u0928\u0947 \u0905\u092d\u0940 \u0924\u0915 \u092c\u0948\u0915\u0905\u092a \u0928\u0939\u0940\u0902 \u0932\u093f\u092f\u093e \u2014 <u>\u0905\u092d\u0940 \u0932\u0947\u0902</u>'
+      : '\u26a0\ufe0f ' + days + ' \u0926\u093f\u0928 \u0938\u0947 \u092c\u0948\u0915\u0905\u092a \u0928\u0939\u0940\u0902 \u0932\u093f\u092f\u093e \u2014 <u>\u0905\u092d\u0940 \u0932\u0947\u0902</u>';
+    bar.style.display = 'block';
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
 // Initial Setup
+ensureCustomerIds();
 document.getElementById('scrapDeduction').value = localStorage.getItem('asc_scrap') || '0';
 document.getElementById('extraDiscount').value = localStorage.getItem('asc_extra') || '0';
 setPaymentMode(currentPayMode);
@@ -1453,6 +1630,7 @@ updateBillNumber();
 renderCatalog();
 renderCustomerSuggestions();
 renderItems();
+checkBackupAge();
 </script>
 </body>
 </html>
