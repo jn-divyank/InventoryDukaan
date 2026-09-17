@@ -499,21 +499,38 @@ const defaultCatalog = [
   { name: "स्टील स्क्रैप / पुराना", mrp: 280, disc: 0 }
 ];
 
-let catalog = JSON.parse(localStorage.getItem('asc_catalog')) || defaultCatalog;
-let customers = JSON.parse(localStorage.getItem('asc_customers')) || [];
-let salesHistory = JSON.parse(localStorage.getItem('asc_sales_history')) || [];
-let purchaseHistory = JSON.parse(localStorage.getItem('asc_purchase_history')) || [];
-let billCounter = parseInt(localStorage.getItem('asc_bill_no') || '1');
-let purchaseCounter = parseInt(localStorage.getItem('asc_purchase_no') || '1');
-let items = JSON.parse(localStorage.getItem('asc_current_items') || '[]');
-let currentPayMode = localStorage.getItem('asc_pay_mode') || 'Cash';
+/* Reading localStorage can throw outright — site data blocked for the origin,
+   or a locked-down browser. Every read below used to be unguarded, so the very
+   first one killed the script: the page rendered but `items` and `catalog`
+   never initialised and not a single item could be added. Reads now fall back,
+   so the app runs from memory and persist() warns that nothing is being saved. */
+let storageUsable = true;
+function readRaw(key) {
+  try { return localStorage.getItem(key); }
+  catch { storageUsable = false; return null; }
+}
+function readJSON(key, fallback) {
+  const raw = readRaw(key);
+  if (raw === null || raw === undefined) return fallback;
+  try { const v = JSON.parse(raw); return v === null ? fallback : v; }
+  catch { return fallback; }
+}
+
+let catalog = readJSON('asc_catalog', defaultCatalog);
+let customers = readJSON('asc_customers', []);
+let salesHistory = readJSON('asc_sales_history', []);
+let purchaseHistory = readJSON('asc_purchase_history', []);
+let billCounter = parseInt(readRaw('asc_bill_no') || '1');
+let purchaseCounter = parseInt(readRaw('asc_purchase_no') || '1');
+let items = readJSON('asc_current_items', []);
+let currentPayMode = readRaw('asc_pay_mode') || 'Cash';
 let currentDocMode = 'SALE';
 let currentHistTab = 'SALE';
-let storeUPI = localStorage.getItem('asc_store_upi') || '7011013472@paytm';
+let storeUPI = readRaw('asc_store_upi') || '7011013472@paytm';
 let currentCustomerOldBal = 0;
-let ledger = JSON.parse(localStorage.getItem('asc_ledger') || '[]');
-let custSeq = parseInt(localStorage.getItem('asc_cust_seq') || '0');
-let ledgerSeq = parseInt(localStorage.getItem('asc_ledger_seq') || '0');
+let ledger = readJSON('asc_ledger', []);
+let custSeq = parseInt(readRaw('asc_cust_seq') || '0');
+let ledgerSeq = parseInt(readRaw('asc_ledger_seq') || '0');
 let itemSeq = 0;
 
 /* ---------------- storage layer ----------------
@@ -667,7 +684,7 @@ function setDocMode(mode) {
 
 function setPaymentMode(mode) {
   currentPayMode = mode;
-  localStorage.setItem('asc_pay_mode', mode);
+  persist('asc_pay_mode', mode);
 
   document.getElementById('payCash').className = 'btn-pay' + (mode === 'Cash' ? ' active-cash' : '');
   document.getElementById('payCredit').className = 'btn-pay' + (mode === 'Credit' ? ' active-credit' : '');
@@ -1015,7 +1032,7 @@ function openUPIQRModal() {
 function closeUPIQRModal() { document.getElementById('qrModal').style.display = 'none'; }
 function saveUPIID() {
   storeUPI = document.getElementById('storeUPIId').value.trim() || '7011013472@paytm';
-  localStorage.setItem('asc_store_upi', storeUPI);
+  persist('asc_store_upi', storeUPI);
   const totals = calculateFinalBill();
   renderQRCodeImage(totals.grandTotal);
 }
@@ -1028,7 +1045,7 @@ function renderQRCodeImage(amt) {
 function openBackupModal() { document.getElementById('backupModal').style.display = 'flex'; }
 function closeBackupModal() { document.getElementById('backupModal').style.display = 'none'; }
 function exportDataBackup() {
-  const fullData = { catalog, customers, salesHistory, purchaseHistory, ledger, custSeq, ledgerSeq, billCounter, purchaseCounter, storeUPI, schemaVersion: 2, exportDate: new Date().toISOString() };
+  const fullData = { catalog, customers, salesHistory, purchaseHistory, ledger, custSeq, ledgerSeq, billCounter, purchaseCounter, storeUPI, deviceId, schemaVersion: 2, exportDate: new Date().toISOString() };
   const blob = new Blob([JSON.stringify(fullData, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1051,6 +1068,7 @@ function importDataBackup(event) {
       if (data.customers) customers = data.customers;
       if (data.salesHistory) salesHistory = data.salesHistory;
       if (data.purchaseHistory) purchaseHistory = data.purchaseHistory;
+      if (data.deviceId) { deviceId = data.deviceId; persist('asc_device_id', deviceId); }
       if (data.ledger) ledger = data.ledger;
       if (data.custSeq) custSeq = data.custSeq;
       if (data.ledgerSeq) ledgerSeq = data.ledgerSeq;
@@ -1058,16 +1076,16 @@ function importDataBackup(event) {
       if (data.purchaseCounter) purchaseCounter = data.purchaseCounter;
       if (data.storeUPI) storeUPI = data.storeUPI;
 
-      localStorage.setItem('asc_catalog', JSON.stringify(catalog));
-      localStorage.setItem('asc_customers', JSON.stringify(customers));
-      localStorage.setItem('asc_sales_history', JSON.stringify(salesHistory));
-      localStorage.setItem('asc_purchase_history', JSON.stringify(purchaseHistory));
-      localStorage.setItem('asc_ledger', JSON.stringify(ledger));
-      localStorage.setItem('asc_cust_seq', custSeq);
-      localStorage.setItem('asc_ledger_seq', ledgerSeq);
-      localStorage.setItem('asc_bill_no', billCounter);
-      localStorage.setItem('asc_purchase_no', purchaseCounter);
-      localStorage.setItem('asc_store_upi', storeUPI);
+      persist('asc_catalog', catalog);
+      persist('asc_customers', customers);
+      persist('asc_sales_history', salesHistory);
+      persist('asc_purchase_history', purchaseHistory);
+      persist('asc_ledger', ledger);
+      persist('asc_cust_seq', custSeq);
+      persist('asc_ledger_seq', ledgerSeq);
+      persist('asc_bill_no', billCounter);
+      persist('asc_purchase_no', purchaseCounter);
+      persist('asc_store_upi', storeUPI);
 
       /* Backups taken before the ledger existed have no party ids; backfill
          them now so a payment recorded in this session cannot post to an
@@ -1675,7 +1693,7 @@ function printThermalSlip() {
 /* A backup the shopkeeper has to remember to take is not a backup. Nag if the
    last export is more than 7 days old. */
 function checkBackupAge() {
-  const last = parseInt(localStorage.getItem('asc_last_backup') || '0');
+  const last = parseInt(readRaw('asc_last_backup') || '0');
   const days = last ? Math.floor((Date.now() - last) / 86400000) : null;
   const bar = document.getElementById('backupNagBar');
   if (!bar) return;
@@ -1691,8 +1709,8 @@ function checkBackupAge() {
 
 // Initial Setup
 ensureCustomerIds();
-document.getElementById('scrapDeduction').value = localStorage.getItem('asc_scrap') || '0';
-document.getElementById('extraDiscount').value = localStorage.getItem('asc_extra') || '0';
+document.getElementById('scrapDeduction').value = readRaw('asc_scrap') || '0';
+document.getElementById('extraDiscount').value = readRaw('asc_extra') || '0';
 setPaymentMode(currentPayMode);
 setDocMode('SALE');
 updateBillNumber();
@@ -1715,12 +1733,32 @@ const SB_URL = window.__SB_URL__ || 'https://mgfmqfhaysohwetuxpdq.supabase.co';
 const SB_KEY = window.__SB_KEY__ || 'sb_publishable_MZIzVv2WJ_7ugrZgaLpMMw_P9vks99_';
 
 let sb = null, sbUser = null;
-let storeId = localStorage.getItem('asc_store_id') || null;
+let storeId = readRaw('asc_store_id') || null;
+
+/* Local record ids are per-device counters: customer #1 on the counter phone
+   and customer #1 on a second phone are different people. Without a device
+   prefix their client_ids collide, and because the sync upserts on
+   (store_id, client_id) the second device's row silently OVERWRITES the
+   first's — the same class of loss as the old bill-number reuse, but on the
+   server. The prefix also lets the unique (store_id, doc_type, doc_no)
+   constraint do its job, since the insert is no longer converted into an
+   update before it can be rejected.
+
+   It travels in the backup, so restoring onto a new phone continues the same
+   identity rather than duplicating every row. */
+let deviceId = readRaw('asc_device_id');
+if (!deviceId) {
+  deviceId = (self.crypto && crypto.randomUUID)
+    ? crypto.randomUUID().slice(0, 8)
+    : Math.random().toString(36).slice(2, 10);
+  try { localStorage.setItem('asc_device_id', deviceId); } catch {}
+}
+const cid = (...parts) => deviceId + ':' + parts.join(':');
 let syncBusy = false, syncTimer = null;
-let dirty = JSON.parse(localStorage.getItem('asc_dirty') || '{}');
+let dirty = readJSON('asc_dirty', {});
 ['parties','products','documents','ledger'].forEach(k => { if (!dirty[k]) dirty[k] = []; });
-let partyUuid = JSON.parse(localStorage.getItem('asc_party_uuid') || '{}');
-let docUuid   = JSON.parse(localStorage.getItem('asc_doc_uuid')   || '{}');
+let partyUuid = readJSON('asc_party_uuid', {});
+let docUuid   = readJSON('asc_doc_uuid', {});
 
 function dirtyCount() {
   return ['parties','products','documents','ledger'].reduce((n,k) => n + dirty[k].length, 0);
@@ -1840,14 +1878,14 @@ async function pushParties() {
   if (!dirty.parties.length) return;
   const rows = customers
     .filter(c => dirty.parties.includes(String(c.id)))
-    .map(c => ({ store_id: storeId, client_id: String(c.id), acc_no: c.acc || null,
+    .map(c => ({ store_id: storeId, client_id: cid(c.id), acc_no: c.acc || null,
                  name: c.name || '\u092a\u093e\u0930\u094d\u091f\u0940', phone: c.phone || null,
                  opening_balance: parseFloat(c.openingBal) || 0 }));
   if (rows.length) {
     const { data, error } = await sb.from('parties')
       .upsert(rows, { onConflict: 'store_id,client_id' }).select('id,client_id');
     if (error) throw error;
-    data.forEach(r => { partyUuid[r.client_id] = r.id; });
+    data.forEach(r => { partyUuid[r.client_id.split(':').pop()] = r.id; });
     persist('asc_party_uuid', partyUuid);
   }
   dirty.parties = [];
@@ -1877,7 +1915,7 @@ async function pushDocuments() {
     if (!bill) continue;
     const t = bill.totals || {};
     const row = {
-      store_id: storeId, client_id: key,
+      store_id: storeId, client_id: cid(key),
       doc_type: bill.type || 'SALE', doc_no: bill.billNo,
       party_id: bill.partyId ? (partyUuid[String(bill.partyId)] || null) : null,
       party_text: bill.cust || null,
@@ -1926,7 +1964,7 @@ async function pushLedger() {
   const rows = ledger
     .filter(e => dirty.ledger.includes(String(e.id)))
     .map(e => ({
-      store_id: storeId, client_id: String(e.id),
+      store_id: storeId, client_id: cid(e.id),
       party_id: partyUuid[String(e.partyId)] || null,
       document_id: e.billNo ? (docUuid['SALE:' + e.billNo] || docUuid['PURCHASE:' + e.billNo] || null) : null,
       entry_type: e.type || 'ADJUSTMENT',

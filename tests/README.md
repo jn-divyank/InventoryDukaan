@@ -7,7 +7,7 @@ framework — each file is a script that asserts through the shared helpers in
 ## Running them
 
 ```sh
-node tests/run-all.mjs          # the seven local suites, no network
+node tests/run-all.mjs          # the local suites, no network
 node tests/run-all.mjs --all    # also the two that talk to Supabase
 node tests/run-all.mjs 05       # just the suites matching "05"
 node tests/01-billing.test.mjs  # one suite directly
@@ -42,6 +42,10 @@ export SHOP_PASSWORD='...'                       # optional, for 09 only
 | `07-output-devices` | Bill text, WhatsApp, thermal print, clipboard, UPI QR, OCR parsing, voice entry, calculator | no |
 | `08-sync-and-rls` | Sync to Postgres, idempotency, editing a synced bill, duplicate-number and double-post rejection, RLS isolation, offline queueing | **yes** |
 | `09-live-smoke` | The deployed site loads and carries the current build | **yes** |
+| `10-offline-shell` | Manifest, service worker, billing with the network gone, and a deploy replacing the cached build | no |
+| `11-session-and-devices` | Staying signed in across reload and restart; two devices racing for one bill number | **yes** |
+| `12-storage-limits` | A full phone, and storage blocked entirely | no |
+| `13-migration` | The Netlify → Vercel handover rehearsed across two origins | **yes** |
 
 ## Safety when testing against production
 
@@ -75,3 +79,18 @@ suite can detect a genuine CORS regression on the Supabase project.
 
 `PLAYWRIGHT_PATH` overrides where Playwright is imported from if it is not at
 the default location.
+
+## Why some assertions look paranoid
+
+Several exist because a weaker version of them passed on a broken app:
+
+* `12-storage-limits` asserts that an item can actually be **added** with
+  storage blocked. An earlier version only checked that the page rendered — and
+  passed while the app was completely dead, because the markup is static and
+  the script had died on its first `localStorage` read.
+* `11-session-and-devices` asserts *which* bill survives a two-device
+  collision, not merely that one does. Checking only the count passed while the
+  second device was silently overwriting the first device's sale on the server.
+* `06-backup` calls the real `exportDataBackup()`. The assertion it replaced
+  built the payload inside the test and checked its own literal, so it could
+  not fail.

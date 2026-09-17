@@ -319,17 +319,29 @@ export async function cleanupTestStore(page) {
   }, SHOP_EMAIL);
 }
 
-/** Pads localStorage until it refuses further writes, leaving the app's own
- *  keys intact. Returns how many padding blocks landed. */
-export const fillStorage = (page, blockKB = 256) =>
-  page.evaluate(kb => {
-    const block = 'x'.repeat(kb * 1024);
+/** Pads localStorage until even a small write fails, leaving the app's own keys
+ *  intact. Large blocks first, then progressively smaller ones — stopping at
+ *  the first failure leaves kilobytes of headroom, which is enough for the very
+ *  writes a test is trying to make fail. */
+export const fillStorage = page =>
+  page.evaluate(() => {
     let n = 0;
-    try {
-      for (; n < 200; n++) localStorage.setItem('__pad_' + n, block);
-    } catch { /* full */ }
-    return n;
-  }, blockKB);
+    // Bytes, not just kilobytes: stopping at the first 1 KB failure leaves
+    // almost a kilobyte free, which is more than enough for the small writes a
+    // test is trying to make fail.
+    for (const bytes of [262144, 65536, 16384, 4096, 1024, 128, 16, 1]) {
+      const block = 'x'.repeat(bytes);
+      for (let i = 0; i < 6000; i++) {
+        try { localStorage.setItem('__pad_' + (n++), block); }
+        catch { n--; break; }
+      }
+    }
+    // Confirm it really is full: a byte-sized write must now fail too.
+    let stillWritable = true;
+    try { localStorage.setItem('__pad_probe', 'x'); localStorage.removeItem('__pad_probe'); }
+    catch { stillWritable = false; }
+    return { blocks: n, stillWritable };
+  });
 
 export const freeStorage = page =>
   page.evaluate(() => {

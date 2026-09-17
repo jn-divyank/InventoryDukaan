@@ -35,6 +35,24 @@ old `oldBal` field got wrong.
 Row level security is on for every table, keyed on store membership via
 `private.is_store_member()`, which lives outside the API-exposed schema.
 
+## Offline
+
+The app installs to a home screen and opens with no connection. `sw.js`
+precaches the shell and both libraries, which are vendored under `vendor/`
+rather than loaded from a CDN — a cross-origin script response is opaque and
+cannot be written to a Cache, and the app could not start at all if the CDN was
+unreachable.
+
+Bump `CACHE_VERSION` in `sw.js` when the precache list changes. The worker never
+serves its own script from cache and the page checks for a new worker on load
+and hourly, so a deploy is not shadowed by a stale cache.
+
+Sync records carry a per-device id in their `client_id`. Local record ids are
+per-device counters, so without it two devices' rows collide and the upsert
+silently overwrites one with the other. The id travels in the backup, so
+restoring onto a new phone continues the same identity rather than duplicating
+every row.
+
 ## Still to do
 
 * **GST.** The shop is registered but bills carry no GSTIN, HSN codes or
@@ -46,7 +64,8 @@ Row level security is on for every table, keyed on store membership via
 * **Stock.** `products.stock_qty`, `products.track_stock` and `stock_movements`
   exist and are unused. Enabling it needs an opening count per item.
 * **Pull-down sync.** Push works; the client does not yet pull server changes
-  back. Fine for one device, needed before a second one.
+  back. Two devices can now bill safely without overwriting each other, but
+  neither sees the other's bills until this lands.
 * **Deletes.** Deleting a party or catalog item locally does not remove it on
   the server. Rows go stale rather than wrong, but it should be handled.
 
