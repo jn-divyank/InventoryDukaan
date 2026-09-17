@@ -188,12 +188,59 @@ $$;
 revoke all on function private.is_store_member(uuid) from public, anon;
 grant execute on function private.is_store_member(uuid) to authenticated, service_role;
 
--- RLS is enabled on every table. Store-scoped tables use a single policy:
---   for all to authenticated
---   using (private.is_store_member(store_id))
---   with check (private.is_store_member(store_id))
--- document_items inherits access through its parent document.
--- stores/store_users are keyed on owner_id = auth.uid().
+-- RLS is the boundary the e2e tests rely on: the test account owns its own
+-- store and therefore cannot read or write the shop's rows. That guarantee has
+-- to be reproducible from this file, not just live in the database.
+alter table public.stores          enable row level security;
+alter table public.store_users     enable row level security;
+alter table public.parties         enable row level security;
+alter table public.products        enable row level security;
+alter table public.documents       enable row level security;
+alter table public.document_items  enable row level security;
+alter table public.ledger_entries  enable row level security;
+alter table public.stock_movements enable row level security;
+alter table public.doc_counters    enable row level security;
+
+-- Store-scoped tables: membership decides everything.
+create policy parties_member         on public.parties         for all to authenticated
+  using (private.is_store_member(store_id)) with check (private.is_store_member(store_id));
+create policy products_member        on public.products        for all to authenticated
+  using (private.is_store_member(store_id)) with check (private.is_store_member(store_id));
+create policy documents_member       on public.documents       for all to authenticated
+  using (private.is_store_member(store_id)) with check (private.is_store_member(store_id));
+create policy ledger_entries_member  on public.ledger_entries  for all to authenticated
+  using (private.is_store_member(store_id)) with check (private.is_store_member(store_id));
+create policy stock_movements_member on public.stock_movements for all to authenticated
+  using (private.is_store_member(store_id)) with check (private.is_store_member(store_id));
+create policy doc_counters_member    on public.doc_counters    for all to authenticated
+  using (private.is_store_member(store_id)) with check (private.is_store_member(store_id));
+
+-- Line items inherit access from their parent document.
+create policy document_items_member on public.document_items for all to authenticated
+  using (exists (select 1 from public.documents d
+                 where d.id = document_items.document_id and private.is_store_member(d.store_id)))
+  with check (exists (select 1 from public.documents d
+                      where d.id = document_items.document_id and private.is_store_member(d.store_id)));
+
+-- Stores and membership are keyed on ownership.
+create policy stores_select on public.stores for select to authenticated
+  using (owner_id = (select auth.uid()) or private.is_store_member(id));
+create policy stores_insert on public.stores for insert to authenticated
+  with check (owner_id = (select auth.uid()));
+create policy stores_update on public.stores for update to authenticated
+  using (owner_id = (select auth.uid())) with check (owner_id = (select auth.uid()));
+create policy stores_delete on public.stores for delete to authenticated
+  using (owner_id = (select auth.uid()));
+
+create policy store_users_select on public.store_users for select to authenticated
+  using (user_id = (select auth.uid())
+         or exists (select 1 from public.stores s
+                    where s.id = store_users.store_id and s.owner_id = (select auth.uid())));
+create policy store_users_write on public.store_users for all to authenticated
+  using (exists (select 1 from public.stores s
+                 where s.id = store_users.store_id and s.owner_id = (select auth.uid())))
+  with check (exists (select 1 from public.stores s
+                      where s.id = store_users.store_id and s.owner_id = (select auth.uid())));
 
 -- ============================================================ views
 -- security_invoker so RLS on the underlying tables still applies.

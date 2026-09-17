@@ -1193,6 +1193,7 @@ function editCustomer(idx) {
 function deleteCustomer(idx) {
   if (confirm("क्या आप इसे हटाना चाहते हैं?")) {
     customers.splice(idx, 1);
+    persistCustomers();
     renderCustomerSuggestions();
     renderModalCustList();
   }
@@ -1416,7 +1417,7 @@ function renderModalCatList() {
   const ul = document.getElementById('modalCatList');
   ul.innerHTML = catalog.map((c, i) => `
     <li class="cat-item-row">
-      <div><strong>${c.name}</strong> - MRP ₹${c.mrp} (${c.disc}% छूट)</div>
+      <div><strong>${esc(c.name)}</strong> - MRP ₹${c.mrp} (${c.disc}% छूट)</div>
       <button class="btn-del" onclick="deleteCatalogItem(${i})">🗑️</button>
     </li>
   `).join('');
@@ -1430,6 +1431,8 @@ function saveManualCatalogItem() {
     return;
   }
   catalog.unshift({ name, mrp, disc });
+  persistCatalog();
+  markDirty('products', name);
   renderCatalog();
   renderModalCatList();
   document.getElementById('mCatName').value = '';
@@ -1437,6 +1440,7 @@ function saveManualCatalogItem() {
 }
 function deleteCatalogItem(index) {
   catalog.splice(index, 1);
+  persistCatalog();
   renderCatalog();
   renderModalCatList();
 }
@@ -1670,8 +1674,10 @@ checkBackupAge();
    at the counter does not. Mutations mark records dirty; a background flush
    pushes them to Postgres and pulls anything newer back.
    ================================================================== */
-const SB_URL = 'https://mgfmqfhaysohwetuxpdq.supabase.co';
-const SB_KEY = 'sb_publishable_MZIzVv2WJ_7ugrZgaLpMMw_P9vks99_';
+/* The overrides let a test (or a future staging build) point the client at a
+   different project without editing this file. Production sets neither. */
+const SB_URL = window.__SB_URL__ || 'https://mgfmqfhaysohwetuxpdq.supabase.co';
+const SB_KEY = window.__SB_KEY__ || 'sb_publishable_MZIzVv2WJ_7ugrZgaLpMMw_P9vks99_';
 
 let sb = null, sbUser = null;
 let storeId = localStorage.getItem('asc_store_id') || null;
