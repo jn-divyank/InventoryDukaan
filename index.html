@@ -930,13 +930,30 @@ function openDailyReportModal() {
 }
 function closeDailyReportModal() { document.getElementById('dailyModal').style.display = 'none'; }
 
+/* A party name containing a double quote would otherwise terminate its field
+   early and shift every later column. RFC 4180 says double it. */
+function csvCell(v) {
+  return '"' + String(v === null || v === undefined ? '' : v).replace(/"/g, '""') + '"';
+}
+function csvRow(cells) { return cells.map(csvCell).join(',') + '\n'; }
+
+/* Excel will not detect UTF-8 without a BOM, and renders Hindi as mojibake. */
+const CSV_BOM = '﻿';
+
 function exportDailyExcelCSV() {
   const todayStr = new Date().toLocaleDateString('en-GB');
   const todaySales = salesHistory.filter(b => b.dateOnly === todayStr || (b.date && b.date.startsWith(todayStr)));
+  const todayPurchases = purchaseHistory.filter(b => b.dateOnly === todayStr || (b.date && b.date.startsWith(todayStr)));
 
-  let csv = "Type,Bill No,Date,Customer,Payment Mode,Total MRP,Grand Total\n";
+  let csv = CSV_BOM + "Type,Bill No,Date,Party,Payment Mode,Total MRP,Grand Total\n";
   todaySales.forEach(b => {
-    csv += `"SALE","${b.billNo}","${b.date}","${b.cust || 'सामान्य'}","${b.payMode}","${b.totals.sumMRP}","${b.totals.grandTotal}"\n`;
+    csv += csvRow(['SALE', b.billNo, b.date, b.cust || 'सामान्य', b.payMode,
+                   b.totals.sumMRP, b.totals.grandTotal]);
+  });
+  // The daily report totals purchases, so the daily export must include them.
+  todayPurchases.forEach(b => {
+    csv += csvRow(['PURCHASE', b.billNo, b.date, b.cust || 'सप्लायर', b.payMode,
+                   b.totals.sumMRP, b.totals.grandTotal]);
   });
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -948,14 +965,16 @@ function exportDailyExcelCSV() {
 }
 
 function exportAllBillsCSV() {
-  let csv = "Type,Bill No,Date,Party,Payment Mode,Total MRP,Grand Total,Items With Warranty\n";
+  let csv = CSV_BOM + "Type,Bill No,Date,Party,Payment Mode,Total MRP,Grand Total,Items With Warranty\n";
   salesHistory.forEach(b => {
     const itemStr = b.items.map(i => `${i.name} (${i.qty} ${i.unit || 'Pcs'}${i.warranty ? ' - ' + i.warranty : ''})`).join(' | ');
-    csv += `"SALE","${b.billNo}","${b.date}","${b.cust || 'सामान्य'}","${b.payMode}","${b.totals.sumMRP}","${b.totals.grandTotal}","${itemStr}"\n`;
+    csv += csvRow(['SALE', b.billNo, b.date, b.cust || 'सामान्य', b.payMode,
+                   b.totals.sumMRP, b.totals.grandTotal, itemStr]);
   });
   purchaseHistory.forEach(b => {
     const itemStr = b.items.map(i => `${i.name} (${i.qty} ${i.unit || 'Pcs'})`).join(' | ');
-    csv += `"PURCHASE","${b.billNo}","${b.date}","${b.cust || 'सप्लायर'}","${b.payMode}","${b.totals.sumMRP}","${b.totals.grandTotal}","${itemStr}"\n`;
+    csv += csvRow(['PURCHASE', b.billNo, b.date, b.cust || 'सप्लायर', b.payMode,
+                   b.totals.sumMRP, b.totals.grandTotal, itemStr]);
   });
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
