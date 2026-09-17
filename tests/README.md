@@ -9,6 +9,11 @@ Both suites drive the real `index.html` in headless Chromium.
 `app.test.mjs` needs no network. The bill-overwrite case in it fails against the
 pre-fix revision, which is the point of it.
 
+`live-smoke.test.mjs` checks the deployed site at
+https://arpit-steel-centre.vercel.app — that it loads, that supabase-js is
+present, that the shop credentials sign in, and that the store row exists. It
+deliberately creates no bills, so it is safe to run against production.
+
 `sync.test.mjs` needs a Supabase account to sign in as. It expects
 `synctest@example.com` / `SyncTest!2026`, which is deliberately NOT left in the
 project — create a throwaway confirmed user before running it and delete it
