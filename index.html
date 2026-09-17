@@ -569,9 +569,15 @@ function findCustomerByInfo(info) {
 }
 
 /* Re-posts a bill's ledger entry. Removing the previous entry for the same
-   bill number first makes this safe to call repeatedly on edit/reprint. */
+   bill number first makes this safe to call repeatedly on edit/reprint.
+
+   The id of any prior entry is REUSED rather than a new one allocated. The
+   server allows one BILL row per document, so a fresh id on every re-save
+   produced a client_id that could never be inserted: editing a credit bill
+   after it had synced wedged the whole sync queue. */
 function postBillToLedger(record) {
   const before = ledger.length;
+  const prior = ledger.find(e => e.type === 'BILL' && e.billNo === record.billNo);
   ledger = ledger.filter(e => !(e.type === 'BILL' && e.billNo === record.billNo));
   let due = 0;
   if (record.payMode === 'Credit') due = record.totals.grandTotal;
@@ -579,7 +585,7 @@ function postBillToLedger(record) {
 
   if (record.partyId && due > 0) {
     ledger.unshift({
-      id: nextLedgerId(),
+      id: prior ? prior.id : nextLedgerId(),
       partyId: record.partyId,
       type: 'BILL',
       billNo: record.billNo,

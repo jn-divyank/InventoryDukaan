@@ -321,10 +321,13 @@ export async function cleanupTestStore(page) {
 export async function bootSignedIn(url) {
   const h = await launch({ egress: 'shim' });
   await h.page.goto(url, { waitUntil: 'load' });
+  // `sb` is a top-level `let`, so it lives in script scope and never appears on
+  // `window` — it must be probed by bare identifier from inside the page.
+  const clientReady = () => typeof sb !== 'undefined' && sb !== null;
   await h.page.waitForFunction(() => typeof window.supabase !== 'undefined', null, { timeout: 30000 });
-  await h.page.waitForFunction(() => window.sb !== null && window.sb !== undefined, null, { timeout: 30000 });
+  await h.page.waitForFunction(clientReady, null, { timeout: 30000 });
   await reset(h.page);
-  await h.page.waitForFunction(() => window.sb !== null && window.sb !== undefined, null, { timeout: 30000 });
+  await h.page.waitForFunction(clientReady, null, { timeout: 30000 });
   const who = await signIn(h.page, testCredentials());
   if (who !== 'ok') throw new Error('test sign-in failed: ' + who);
   return h;
