@@ -91,10 +91,12 @@ export async function finish() {
  * it, so requests are relayed through the host process instead. Outside the
  * sandbox 'none' works everywhere and this is a no-op cost.
  */
-export async function launch({ egress = 'none' } = {}) {
+export async function launch({ egress = 'none', storageState } = {}) {
   const browser = await chromium.launch();
   openBrowsers.add(browser);
-  const ctx = await browser.newContext();
+  // storageState replays localStorage and cookies, which is how a phone being
+  // closed and reopened is simulated.
+  const ctx = await browser.newContext(storageState ? { storageState } : {});
   const page = await ctx.newPage();
 
   // Registered BEFORE any navigation, so errors during the suite body are seen.
@@ -316,6 +318,43 @@ export async function cleanupTestStore(page) {
     return 'cleaned ' + ids.length + ' store(s)';
   }, SHOP_EMAIL);
 }
+
+/** Pads localStorage until it refuses further writes, leaving the app's own
+ *  keys intact. Returns how many padding blocks landed. */
+export const fillStorage = (page, blockKB = 256) =>
+  page.evaluate(kb => {
+    const block = 'x'.repeat(kb * 1024);
+    let n = 0;
+    try {
+      for (; n < 200; n++) localStorage.setItem('__pad_' + n, block);
+    } catch { /* full */ }
+    return n;
+  }, blockKB);
+
+export const freeStorage = page =>
+  page.evaluate(() => {
+    let n = 0;
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith('__pad_')) { localStorage.removeItem(k); n++; }
+    }
+    return n;
+  });
+
+/** Waits for the service worker to control the page.
+ *  `navigator.serviceWorker.ready` resolves only once a registration has an
+ *  active worker, which getRegistration() can race against while skipWaiting
+ *  swaps workers. */
+export const swActivated = async (page, { timeout = 20000 } = {}) => {
+  await page.waitForFunction(async () => {
+    if (!('serviceWorker' in navigator)) return false;
+    const reg = await navigator.serviceWorker.ready;
+    return !!(reg && reg.active);
+  }, null, { timeout });
+  return page.evaluate(async () => {
+    const reg = await navigator.serviceWorker.ready;
+    return { scope: reg.scope, state: reg.active.state };
+  });
+};
 
 /** Boots a page signed in as the test account, ready to sync. */
 export async function bootSignedIn(url) {

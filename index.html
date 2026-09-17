@@ -4,8 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>अर्पित स्टील सेंटर - स्मार्ट ERP बिलिंग प्रो+</title>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1e3a8a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<!-- Served from this origin rather than a CDN. The app could not start at all
+     if jsDelivr was unreachable, which on a shop's mobile data is a real
+     failure mode; it also lets the service worker cache them as ordinary
+     same-origin responses, since cross-origin script requests come back opaque
+     and cannot be written to a cache. -->
+<script src="vendor/tesseract.min.js"></script>
+<script src="vendor/supabase-js.min.js"></script>
 <style>
 :root {
   --primary: #1e3a8a;
@@ -1969,6 +1979,27 @@ async function syncNow(manual) {
 
 window.addEventListener('online',  () => { setSyncChip(); scheduleSync(1000); });
 window.addEventListener('offline', () => setSyncChip());
+
+/* ------------------------------------------------------------------
+   Offline shell. Without a service worker the app cannot open without a
+   connection — the host requires revalidation on every load — even though all
+   the data is already on the device. Guarded so an unsupporting browser, or a
+   page opened over file://, is simply unaffected.
+   ------------------------------------------------------------------ */
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  window.addEventListener('load', async () => {
+    try {
+      const reg = await navigator.serviceWorker.register('sw.js');
+      /* An app kept open all day at the counter would otherwise never check for
+         a new worker. Check now and hourly, so a deploy reaches the shop
+         without anyone having to clear anything. */
+      reg.update().catch(() => {});
+      setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000);
+    } catch (err) {
+      console.warn('offline shell unavailable:', err.message);
+    }
+  });
+}
 setInterval(() => { if (dirtyCount()) scheduleSync(0); }, 5 * 60 * 1000);
 initSupabase();
 
